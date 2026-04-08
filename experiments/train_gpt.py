@@ -66,6 +66,7 @@ class Hyperparameters:
     model_dim = int(os.environ.get("MODEL_DIM", 512))
     num_heads = int(os.environ.get("NUM_HEADS", 8))
     mlp_mult = int(os.environ.get("MLP_MULT", 2))
+    mlp_rank: int = int(os.environ.get("MLP_RANK", 32))
     tie_embeddings = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     rope_base = float(os.environ.get("ROPE_BASE", 10000.0))
     logit_softcap = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
@@ -649,6 +650,7 @@ class Block(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         mlp_mult: int,
+        mlp_rank: int,
         rope_base: float,
         qk_gain_init: float,
         block_idx: int
@@ -657,7 +659,7 @@ class Block(nn.Module):
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
-        self.mlp = AdapterMLP(dim, mlp_mult, rank=32, seed=block_idx*2)
+        self.mlp = AdapterMLP(dim, mlp_mult, rank=mlp_rank, seed=block_idx*2)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.resid_mix = nn.Parameter(torch.stack((torch.ones(dim), torch.zeros(dim))).float())
@@ -680,6 +682,7 @@ class GPT(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         mlp_mult: int,
+        mlp_rank: int,
         tie_embeddings: bool,
         tied_embed_init_std: float,
         logit_softcap: float,
@@ -704,6 +707,7 @@ class GPT(nn.Module):
                     num_heads,
                     num_kv_heads,
                     mlp_mult,
+                    mlp_rank,
                     rope_base,
                     qk_gain_init,
                     block_idx=i
@@ -857,6 +861,7 @@ def main() -> None:
         num_heads=args.num_heads,
         num_kv_heads=args.num_kv_heads,
         mlp_mult=args.mlp_mult,
+        mlp_rank=args.mlp_rank,
         tie_embeddings=args.tie_embeddings,
         tied_embed_init_std=args.tied_embed_init_std,
         logit_softcap=args.logit_softcap,

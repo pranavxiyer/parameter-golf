@@ -75,6 +75,7 @@ class Hyperparameters:
     num_heads: int = int(os.environ.get("NUM_HEADS", 8))
     num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 4))
     mlp_mult: int = int(os.environ.get("MLP_MULT", 2))
+    mlp_rank: int = int(os.environ.get("MLP_RANK", 32))
     tie_embeddings: bool = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     tied_embed_init_std: float = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
     logit_chunk_tokens: int = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
@@ -385,6 +386,7 @@ class Block(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         mlp_mult: int,
+        mlp_rank: int,
         rope_base: float,
         qk_gain_init: float,
         block_idx: int
@@ -394,7 +396,7 @@ class Block(nn.Module):
         self.mlp_norm = RMSNormNoWeight()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
         # self.mlp = MLP(dim, mlp_mult)
-        self.mlp = AdapterMLP(dim, mlp_mult, rank=32, seed=block_idx*2)
+        self.mlp = AdapterMLP(dim, mlp_mult, rank=mlp_rank, seed=block_idx*2)
         self.attn_scale = mx.ones((dim,), dtype=mx.float32)
         self.mlp_scale = mx.ones((dim,), dtype=mx.float32)
         self.resid_mix = mx.array(np.stack((np.ones((dim,), dtype=np.float32), np.zeros((dim,), dtype=np.float32))))
@@ -413,9 +415,9 @@ class GPT(nn.Module):
     # - encoder half accumulates skip tensors
     # - decoder half consumes reversed skips with learned skip_weights
     # - tied embeddings for the LM head (the baseline default setup)
-    def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
-                 logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
-                 qk_gain_init: float):
+    def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int, 
+                 mlp_rank: int, logit_chunk_tokens: int, logit_softcap: float, rope_base: float, 
+                 tied_embed_init_std: float, qk_gain_init: float):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -428,7 +430,7 @@ class GPT(nn.Module):
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
         self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
         self.blocks = [
-            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init, block_idx=i)
+            Block(dim, num_heads, num_kv_heads, mlp_mult, mlp_rank, rope_base, qk_gain_init, block_idx=i)
             for i in range(num_layers)
         ]
         self.final_norm = RMSNormNoWeight()
@@ -922,6 +924,7 @@ def main() -> None:
         num_heads=args.num_heads,
         num_kv_heads=args.num_kv_heads,
         mlp_mult=args.mlp_mult,
+        mlp_rank=args.mlp_rank,
         logit_chunk_tokens=args.logit_chunk_tokens,
         logit_softcap=args.logit_softcap,
         rope_base=args.rope_base,
