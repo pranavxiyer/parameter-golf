@@ -645,7 +645,7 @@ def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str,
 
         # Small float tensors are cheap enough to keep directly. We still downcast
         # fp32/bf16 passthrough tensors to fp16 so metadata does not dominate size.
-        if int(arr.size) <= INT8_KEEP_FLOAT_MAX_NUMEL:
+        if int(arr.size) <= INT8_KEEP_FLOAT_MAX_NUMEL or "tok_emb" in name:
             kept = keep_float_array(name, arr, passthrough_orig_dtypes)
             passthrough[name] = kept
             stats["int8_payload_bytes"] += int(kept.nbytes)
