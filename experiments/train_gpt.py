@@ -59,6 +59,8 @@ class Hyperparameters:
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
     qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
+    int6_layers = [int(x) for x in os.environ.get("INT6_LAYERS", "").split(",") if x]
+    int6_step: int = int(os.environ.get("INT6_STEP", 4))
 
     # Model shape.
     vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
@@ -341,7 +343,7 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
     q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
     return q, scale
 
-def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
+def quantize_state_dict_int8(state_dict: dict[str, Tensor], int6_layers: list[int] = [], int6_step: int = 4):
     # Single supported clean-script export format:
     # - per-row int8 for 2D float tensors
     # - per-tensor int8 for other float tensors
@@ -380,6 +382,13 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
 
         stats["num_float_tensors"] += 1
         q, s = quantize_float_tensor(t)
+        
+        # INT6 rounding for middle layers
+        use_int6 = any(f"blocks.{i}." in name for i in int6_layers)
+        if use_int6:
+            q = torch.round(q.float() / int6_step) * int6_step
+            q = q.clamp(-127, 127).to(torch.int8).contiguous()
+
         if s.ndim > 0:
             qmeta[name] = {"scheme": "per_row", "axis": 0}
         quantized[name] = q
@@ -1106,7 +1115,7 @@ def main() -> None:
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
 
-    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
+    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict(), args.int6_layers, args.int6_step)
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()

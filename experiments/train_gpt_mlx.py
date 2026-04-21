@@ -83,6 +83,8 @@ class Hyperparameters:
     logit_softcap: float = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
     rope_base: float = float(os.environ.get("ROPE_BASE", 10000.0))
     qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
+    int6_layers = [int(x) for x in os.environ.get("INT6_LAYERS", "").split(",") if x]
+    int6_step: int = int(os.environ.get("INT6_STEP", 4))
 
     # Optimizer. We keep the same per-group defaults as train_gpt.py.
     beta1: float = float(os.environ.get("BETA1", 0.9))
@@ -97,10 +99,10 @@ class Hyperparameters:
     muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
     
-    # run loss on entire validation dataset (default to no!)
+    # extras
     skip_final_val: bool = bool(int(os.environ.get("SKIP_FINAL_VAL", "1")))
-
-    # "log" output directoru
+    use_zstd: bool = bool(int(os.environ.get("USE_ZSTD", "1")))
+    zstd_level: int = int(os.environ.get("ZSTD_LEVEL", 22))
     out_dir: str = os.environ.get("OUT_DIR", "logs")
 
     @property
@@ -623,7 +625,7 @@ def quantize_float_array(arr: mx.array) -> tuple[np.ndarray, np.ndarray]:
     return np.ascontiguousarray(q), scale
 
 
-def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str, object], dict[str, int]]:
+def quantize_state_dict_int8(flat_state: dict[str, mx.array], int6_layers: list[int] = [], int6_step: int = 4) -> tuple[dict[str, object], dict[str, int]]:
     quantized: dict[str, np.ndarray] = {}
     scales: dict[str, np.ndarray] = {}
     dtypes: dict[str, str] = {}
@@ -638,6 +640,7 @@ def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str,
         stats["param_count"] += int(arr.size)
         stats["num_tensors"] += 1
         stats["baseline_tensor_bytes"] += int(arr.nbytes)
+
         if not mx.issubdtype(arr.dtype, mx.floating):
             stats["num_nonfloat_tensors"] += 1
             passthrough[name] = np.ascontiguousarray(np.array(arr))
@@ -654,12 +657,21 @@ def quantize_state_dict_int8(flat_state: dict[str, mx.array]) -> tuple[dict[str,
 
         stats["num_float_tensors"] += 1
         q, s = quantize_float_array(arr)
+
+        # apply INT6 rounding for middle layers
+        use_int6 = any(f"blocks.{i}." in name for i in int6_layers)
+        if use_int6:
+            q = np.round(q.astype(np.float32) / int6_step) * int6_step
+            q = np.clip(q, -127, 127).astype(np.int8, copy=False)
+            q = np.ascontiguousarray(q)
+
         if s.ndim > 0:
             qmeta[name] = {"scheme": "per_row", "axis": 0}
         quantized[name] = q
         scales[name] = s
         dtypes[name] = str(arr.dtype).split(".")[-1]
         stats["int8_payload_bytes"] += int(q.nbytes + s.nbytes)
+
     obj: dict[str, object] = {
         "__quant_format__": "int8_clean_per_row_v1",
         "quantized": quantized,
@@ -1102,7 +1114,7 @@ def main() -> None:
     mx.savez(str(out_path), **flat_state)
     log(f"saved_model:{out_path} bytes:{out_path.stat().st_size}")
 
-    quant_obj, quant_stats = quantize_state_dict_int8(flat_state)
+    quant_obj, quant_stats = quantize_state_dict_int8(flat_state, int6_layers=args.int6_layers, int6_step=args.int6_step)
     quant_raw = pickle.dumps(quant_obj, protocol=pickle.HIGHEST_PROTOCOL)
     # quant_blob = zlib.compress(quant_raw, level=9)
     # zstd
