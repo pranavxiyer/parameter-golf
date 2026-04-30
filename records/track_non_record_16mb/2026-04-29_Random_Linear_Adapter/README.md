@@ -27,7 +27,7 @@ With these savings, I mostly utilized the freed artifact budget for:
 3. MLP mult 3x (instead of 2)
 4. sequence length 2048
 4. FP16 tied embedding
-5. mixed int-6/int-8 compression (int-6 compression on the middle 3 blocks, i.e. 5, 6, 7)
+5. mixed int-6/int-8 compression (int-6 compression only on 3 blocks, i.e. 5, 6, 7)
 6. zstd-22 compression
 7. sliding window evaluation: stride=512
 8. lower learning rates: MATRIX_LR=0.02, SCALAR_LR=0.02, TIED_EMBED_LR=0.03
@@ -60,7 +60,3 @@ torchrun --standalone --nproc_per_node=8 train_gpt.py
 | 1337     | 1.2184   | 1.1971          | 15418110       |
 | 42       | 1.2182   | 1.1969          | 15422121       |
 | 2026     | 1.2179   | 1.1967          | 15413210       |
-
-
-## 30-minute WallClock Results (8×H100 SXM)
-As this method reduced the number of parameters within the MLP, I wanted to measure how performance is impacted beyond the 10-minute training time &mdash; would it degrade or remain manageable, such that this could potentially be adopted in practice? Additionally, I wanted to see how the expanded attention performed with an extended training time.
