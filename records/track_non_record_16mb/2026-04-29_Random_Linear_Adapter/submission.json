@@ -1,0 +1,6 @@
+{
+    "author": "Pranav Iyer",
+    "github_id": "pranavxiyer",
+    "name": "Learned Adapters on Random Linear Maps",
+    "blurb": "MLP using LoRA style adapters, allowing for a wider and deeper model"
+}
