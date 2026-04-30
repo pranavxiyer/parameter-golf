@@ -1,7 +1,7 @@
 # Notable Non-Record Submission: {} BPB — Learned Adapters on Random Linear Maps
 
 ## Summary
-random adapter MLPs + mixed int-6/int-8 compression + sliding eval
+12 transformer layers, random adapter MLPs, mixed int-6/int-8 compression, and sliding eval
 
 ## Key Architecture Change
 The main idea behind this submission is the idea of learned adapters on random linear maps. In the baseline, within each block's MLP, there are 2 large matrices stored &mdash; fc of (hidden, dim) and proj of (dim, hidden). Instead, the AdapterMLP utilizes a random seed to generate W_fc and W_proj of the same dimensions as fc and proj in the baseline. However, these do not take up space within the artifact, since they are randomly generated and not fixed parameters (random linear map). In order to actually have meaningful computation within the MLP, there are 2 low-rank matrices stored for each W_fc and W_proj, essentially acting as LoRA matrices that facilitate learning (learned adapters). The dimensions of A, B for W_fc are (hidden, rank) and (rank, dim). The dimensions of A, B for W_proj are (dim, rank) and (rank, hidden). 
@@ -18,7 +18,7 @@ Even with a wider MLP hidden dimension, this architecture saves 37.5% parameters
 
 ## Space Savings
 With these savings, I mostly utilized the freed artifact budget for:
-- 12 transformer layers
+- increasing the number of transformer layers
 - wider MLP &mdash; using rank=160 to maintain expressiveness, while staying within the artifact budget
 
 ## Changes from Baseline
@@ -33,9 +33,9 @@ With these savings, I mostly utilized the freed artifact budget for:
 8. lower learning rates: MATRIX_LR=0.02, SCALAR_LR=0.02, TIED_EMBED_LR=0.03
 
 ## Run
-````bash pip install zstandard````
+```bash pip install zstandard```
 
-````bash
+```bash
 RUN_ID=train_gpt \
 NUM_LAYERS=12 \
 MLP_MULT=3 \
@@ -52,7 +52,7 @@ TRAIN_LOG_EVERY=200 \
 VAL_LOSS_EVERY=1000 \
 MAX_WALLCLOCK_SECONDS=600 \
 torchrun --standalone --nproc_per_node=8 train_gpt.py
-````
+```
 
 ## 10-minute Wallclock Results (8×H100 SXM)
 | seed     | val_bpb  | sliding_val_bpb | submission_size|
@@ -63,3 +63,4 @@ torchrun --standalone --nproc_per_node=8 train_gpt.py
 
 
 ## 30-minute WallClock Results (8×H100 SXM)
+As this method reduced the number of parameters within the MLP, I wanted to measure how performance is impacted beyond the 10-minute training time &mdash; would it degrade or remain manageable, such that this could potentially be adopted in practice? Additionally, I wanted to see how the expanded attention performed with an extended training time.
