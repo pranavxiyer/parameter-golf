@@ -485,6 +485,13 @@ class GPT(nn.Module):
             logits = self.softcap(logits_proj)
             loss_sum = loss_sum + nn.losses.cross_entropy(logits.astype(mx.float32), y[s:e], reduction="sum")
         return loss_sum / float(n)
+    
+    def loss_per_token(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
+        x = self(input_ids).reshape(-1, self.tok_emb.weight.shape[1])
+        y = target_ids.reshape(-1)
+        logits_proj = x @ self.tok_emb.weight.astype(x.dtype).T
+        logits = self.softcap(logits_proj)
+        return nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="none")
 
 # ==============================================================================
 # OPTIMIZERS (MUON + ADAM SPLIT)
@@ -624,7 +631,7 @@ def quantize_float_array(arr: mx.array) -> tuple[np.ndarray, np.ndarray]:
     q = np.clip(np.round(np.clip(f32, -clip_abs, clip_abs) / scale), -127, 127).astype(np.int8, copy=False)
     return np.ascontiguousarray(q), scale
 
-
+ 
 def quantize_state_dict_int8(flat_state: dict[str, mx.array], int6_layers: list[int] = [], int6_step: int = 4) -> tuple[dict[str, object], dict[str, int]]:
     quantized: dict[str, np.ndarray] = {}
     scales: dict[str, np.ndarray] = {}
@@ -858,6 +865,53 @@ def eval_val(
     val_bpb = bits_per_token * (total_tokens / total_bytes)
     return val_loss, val_bpb
 
+def eval_val_sliding(
+    args: Hyperparameters,
+    compiled_loss_per_token,
+    val_tokens: np.ndarray,
+    base_bytes_lut: np.ndarray,
+    has_leading_space_lut: np.ndarray,
+    is_boundary_token_lut: np.ndarray,
+    stride: int = 64,
+    log_fn: Callable[[str], None] | None = None,
+) -> tuple[float, float]:
+    # Validation computes two metrics:
+    # - val_loss: token cross-entropy (natural log)
+    # - val_bpb: tokenizer-agnostic compression metric used by the challenge
+    total_loss_sum = 0.0
+    total_tokens = 0.0
+    total_bytes = 0.0
+    starts = list(range(0, val_tokens.size - args.train_seq_len, stride))
+    total_windows = len(starts)
+    score_start = args.train_seq_len - stride
+    for window_idx, seq_start in enumerate(starts, start=1):
+        seq_end = seq_start + args.train_seq_len
+        chunk = val_tokens[seq_start:seq_end + 1]
+        x_np = chunk[:-1].reshape(1, args.train_seq_len)
+        y_np = chunk[1:].reshape(1, args.train_seq_len)
+        x = mx.array(x_np, dtype=mx.int32)
+        y = mx.array(y_np, dtype=mx.int32)
+        per_token_loss = compiled_loss_per_token(x, y)
+        mx.eval(per_token_loss)
+        scored_loss = per_token_loss[score_start:]
+        total_loss_sum += float(scored_loss.sum().item())
+        prev_ids = x_np[0, score_start:]
+        tgt_ids = y_np[0, score_start:]
+        bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
+        bytes_np += (
+            has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+        ).astype(np.int16, copy=False)
+        total_tokens += stride
+        total_bytes += float(bytes_np.astype(np.float64).sum())
+        if log_fn is not None and total_windows > 1 and (
+            window_idx == 1 or window_idx == total_windows or window_idx % 25 == 0
+        ):
+            log_fn(f"sliding val_progress:{window_idx}/{total_windows}")
+    val_loss = total_loss_sum / total_tokens
+    bits_per_token = val_loss / math.log(2.0)
+    val_bpb = bits_per_token * (total_tokens / total_bytes)
+    return val_loss, val_bpb
+
 # -----------------------------
 # TRAINING
 # -----------------------------
@@ -959,6 +1013,7 @@ def main() -> None:
         inputs=model.state,
         outputs=model.state,
     )
+    compiled_loss_per_token = mx.compile(lambda x, y: model.loss_per_token(x, y), inputs=model.state, outputs=model.state)
 
     # Print config once so logs are self-describing.
     n_params = sum(int(np.prod(p.shape)) for _, p in tree_flatten(model.parameters()))
@@ -1037,6 +1092,11 @@ def main() -> None:
         y_val = mx.array(warm_chunk[1:].reshape(-1, args.train_seq_len), dtype=mx.int32)
         warm_val_loss = compiled_loss(x_val, y_val)
         mx.eval(warm_val_loss)
+        warm_chunk_single = val_tokens[:args.train_seq_len + 1]
+        x_val_single = mx.array(warm_chunk_single[:-1].reshape(1, args.train_seq_len), dtype=mx.int32)
+        y_val_single = mx.array(warm_chunk_single[1:].reshape(1, args.train_seq_len), dtype=mx.int32)
+        warm_per_token_loss = compiled_loss_per_token(x_val_single, y_val_single)
+        mx.eval(warm_per_token_loss)
         mx.synchronize()
 
         train_loader = TokenLoader(args.train_files, log_fn=log, dataset_name=dataset_name)
@@ -1152,6 +1212,19 @@ def main() -> None:
         q_eval_ms = 1000.0 * (time.perf_counter() - q_t0)
         log(f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval_time:{q_eval_ms:.0f}ms")
         log(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+        q_sliding_t0 = time.perf_counter()
+        q_sliding_val_loss, q_sliding_val_bpb = eval_val_sliding(
+            args,
+            compiled_loss_per_token,
+            val_tokens,
+            base_bytes_lut,
+            has_leading_space_lut,
+            is_boundary_token_lut,
+            log_fn=log
+        )
+        q_sliding_eval_ms = 1000.0 * (time.perf_counter() - q_sliding_t0)
+        log(f"final_int8_zlib_roundtrip sliding val_loss:{q_sliding_val_loss:.4f} sliding val_bpb:{q_sliding_val_bpb:.4f} eval_time:{q_sliding_eval_ms:.0f}ms")
+        log(f"final_int8_zlib_roundtrip_exact sliding val_loss:{q_sliding_val_loss:.8f} sliding val_bpb:{q_sliding_val_bpb:.8f}")
 
 
 if __name__ == "__main__":
