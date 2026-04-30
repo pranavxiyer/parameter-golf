@@ -1,6 +1,7 @@
 # Notable Non-Record Submission: {} BPB — Learned Adapters on Random Linear Maps
 
 ## Summary
+random adapter MLPs + mixed int-6/int-8 compression + sliding eval
 
 ## Key Architecture Change
 The main idea behind this submission is the idea of learned adapters on random linear maps. In the baseline, within each block's MLP, there are 2 large matrices stored &mdash; fc of (hidden, dim) and proj of (dim, hidden). Instead, the AdapterMLP utilizes a random seed to generate W_fc and W_proj of the same dimensions as fc and proj in the baseline. However, these do not take up space within the artifact, since they are randomly generated and not fixed parameters (random linear map). In order to actually have meaningful computation within the MLP, there are 2 low-rank matrices stored for each W_fc and W_proj, essentially acting as LoRA matrices that facilitate learning (learned adapters). The dimensions of A, B for W_fc are (hidden, rank) and (rank, dim). The dimensions of A, B for W_proj are (dim, rank) and (rank, hidden). 
@@ -31,8 +32,34 @@ With these savings, I mostly utilized the freed artifact budget for:
 7. sliding window evaluation: stride=512
 8. lower learning rates: MATRIX_LR=0.02, SCALAR_LR=0.02, TIED_EMBED_LR=0.03
 
-random adapter MLPs + mixed int-6/int-8 compression + sliding eval
+## Run
+````bash pip install zstandard````
 
-## 10-minute Wallclock Results
+````bash
+RUN_ID=train_gpt \
+NUM_LAYERS=12 \
+MLP_MULT=3 \
+MLP_RANK=160 \
+INT6_LAYERS=5,6,7 \
+INT6_STEP=4 \
+TRAIN_SEQ_LEN=2048 \
+STRIDE=512 \
+MATRIX_LR=0.02 \
+SCALAR_LR=0.02 \
+TIED_EMBED_LR=0.03 \
+ITERATIONS=20000 \
+TRAIN_LOG_EVERY=200 \
+VAL_LOSS_EVERY=1000 \
+MAX_WALLCLOCK_SECONDS=600 \
+torchrun --standalone --nproc_per_node=8 train_gpt.py
+````
 
-## 30-minute WallClock Results
+## 10-minute Wallclock Results (8×H100 SXM)
+| seed     | val_bpb  | sliding_val_bpb | submission_size|
+|----------|----------|-----------------|----------------|
+| 1337     | 1.2184   | 1.1971          | 15418110       |
+| 42       | 1.2182   | 1.1969          | 15422121       |
+| 2026     | 1.2179   | 1.1967          | 15413210       |
+
+
+## 30-minute WallClock Results (8×H100 SXM)
